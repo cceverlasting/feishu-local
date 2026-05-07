@@ -1,0 +1,28 @@
+{
+  "name": "feishu-local-ai-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "submit:demo": "tsx src/cli/submit-job.ts",
+    "jobs:list": "node dist/cli/jobs.js list",
+    "jobs:get": "node dist/cli/jobs.js get",
+    "jobs:retry": "node dist/cli/jobs.js retry"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.62.1",
+    "better-sqlite3": "^12.4.1",
+    "dotenv": "^17.4.2",
+    "playwright": "^1.59.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
