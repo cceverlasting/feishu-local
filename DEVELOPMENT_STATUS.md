@@ -32,6 +32,9 @@
 - 管理页已可查看扩展搜索的 query 规划、结果列表与封闭来源覆盖提示
 - 扩展搜索已支持“通用网页搜索 + 公众号文章搜索”双路并行，并统一去重、排序和回灌研究链
 - 公众号结果会尽量补充 `wechatBiz`、公众号名称、发布时间与来源层级，但仍受搜狗结果覆盖和反爬限制影响
+- 扩展搜索策略已升级为“先提炼扩展点（含理由）-> 再按扩展点生成定向 query -> 抓取后做质量打分筛选”，减少只做格式化总结的问题
+- 通用网页搜索除 `SEARCH_API_URL` 外，已支持直接使用 Google Custom Search API（`GOOGLE_SEARCH_API_KEY` + `GOOGLE_SEARCH_CX`）
+- 日志已新增扩展搜索阶段节点（`research_search.expand.start/query.start/expand.complete`），方便观察是否已进入扩展分析
 
 当前已确认的 `chat_id` 路由 canonical schema：
 

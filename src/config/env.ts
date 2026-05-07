@@ -40,6 +40,8 @@ const envSchema = z.object({
   SEARCH_API_URL: z.string().trim().url().optional(),
   SEARCH_API_KEY: z.string().trim().optional(),
   SEARCH_API_AUTH_HEADER: z.string().trim().default("authorization"),
+  GOOGLE_SEARCH_API_KEY: z.string().trim().optional(),
+  GOOGLE_SEARCH_CX: z.string().trim().optional(),
   WEIXIN_SEARCH_ENABLED: booleanish.default(false),
   WEIXIN_SEARCH_MAX_PAGES: z.coerce.number().int().positive().default(2),
   WEIXIN_SEARCH_API_URL: z.string().trim().url().optional(),

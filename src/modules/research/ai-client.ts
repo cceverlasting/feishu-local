@@ -97,11 +97,18 @@ interface PreparedResearchRequest {
     enabled: boolean;
     provider: string;
     plannedQueries: string[];
+    expansionPoints: Array<{
+      point: string;
+      reason?: string;
+      priority: number;
+      queries: string[];
+    }>;
     planReason?: string;
     inaccessibleSourceNotes: string[];
     warnings: string[];
     documents: Array<{
       query: string;
+      expansionPoint?: string;
       sourceUrl: string;
       title?: string;
       snippet?: string;
@@ -758,11 +765,26 @@ function buildUserPrompt(
         "Expanded web research:",
         `Search provider: ${searchExpansion.provider}`,
         `Planned queries: ${searchExpansion.plannedQueries.join(" | ") || "none"}`,
+        ...(searchExpansion.expansionPoints.length > 0
+          ? [
+              "Expansion points:",
+              ...searchExpansion.expansionPoints.map((point) =>
+                [
+                  `- P${point.priority}: ${point.point}`,
+                  point.reason ? `  reason: ${point.reason}` : "",
+                  `  queries: ${point.queries.join(" | ")}`
+                ]
+                  .filter(Boolean)
+                  .join("\n")
+              )
+            ]
+          : []),
         ...(searchExpansion.planReason ? [`Plan reason: ${searchExpansion.planReason}`] : []),
         ...searchExpansion.documents.slice(0, 6).map((document, index) =>
           [
             `Search result ${index + 1}`,
             `Query: ${document.query}`,
+            document.expansionPoint ? `Expansion point: ${document.expansionPoint}` : "",
             `Source kind: ${document.sourceKind}`,
             `Source tier: ${document.sourceTier}`,
             `URL: ${document.sourceUrl}`,
@@ -950,11 +972,13 @@ function buildSearchExpansionMetadata(
     enabled: searchExpansion.enabled,
     provider: searchExpansion.provider,
     plannedQueries: searchExpansion.plannedQueries,
+    expansionPoints: searchExpansion.expansionPoints,
     ...(searchExpansion.planReason ? { planReason: searchExpansion.planReason } : {}),
     inaccessibleSourceNotes: searchExpansion.inaccessibleSourceNotes,
     warnings: searchExpansion.warnings,
     documents: searchExpansion.documents.map((document) => ({
       query: document.query,
+      ...(document.expansionPoint ? { expansionPoint: document.expansionPoint } : {}),
       sourceUrl: document.sourceUrl,
       ...(document.title ? { title: document.title } : {}),
       ...(document.snippet ? { snippet: truncateText(document.snippet, 240) } : {}),

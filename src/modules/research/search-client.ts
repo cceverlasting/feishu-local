@@ -21,6 +21,8 @@ export interface SearchExpansionRequest {
 
 export interface SearchDocument {
   query: string;
+  expansionPoint?: string;
+  expansionPointReason?: string;
   sourceKind: SearchSourceKind;
   sourceTier: SearchSourceTier;
   title?: string;
@@ -39,6 +41,12 @@ export interface SearchExpansionResult {
   enabled: boolean;
   provider: string;
   plannedQueries: string[];
+  expansionPoints: Array<{
+    point: string;
+    reason?: string;
+    priority: number;
+    queries: string[];
+  }>;
   planReason?: string;
   documents: SearchDocument[];
   inaccessibleSourceNotes: string[];
@@ -49,6 +57,12 @@ interface QueryPlanResponse {
   queries?: string[];
   rationale?: string;
   inaccessible_source_notes?: string[];
+  points?: Array<{
+    point?: string;
+    reason?: string;
+    priority?: number;
+    queries?: string[];
+  }>;
 }
 
 interface ChatCompletionResponse {
@@ -85,6 +99,14 @@ interface SearchApiResponse {
     source?: string;
   }>;
 }
+interface GoogleCustomSearchResponse {
+  items?: Array<{
+    title?: string;
+    link?: string;
+    snippet?: string;
+    displayLink?: string;
+  }>;
+}
 
 interface WeixinSearchResult {
   title?: string;
@@ -116,7 +138,10 @@ export class ResearchSearchClient {
   }
 
   isEnabled() {
-    return this.env.RESEARCH_SEARCH_ENABLED && (Boolean(this.env.SEARCH_API_URL) || this.isWeixinEnabled());
+    return (
+      this.env.RESEARCH_SEARCH_ENABLED &&
+      (Boolean(this.env.SEARCH_API_URL) || this.isGoogleSearchEnabled() || this.isWeixinEnabled())
+    );
   }
 
   async expand(request: SearchExpansionRequest): Promise<SearchExpansionResult> {
@@ -125,6 +150,7 @@ export class ResearchSearchClient {
         enabled: false,
         provider: "none",
         plannedQueries: [],
+        expansionPoints: [],
         documents: [],
         inaccessibleSourceNotes: inferClosedSourceNotes(request),
         warnings: this.isEnabled() ? [] : ["search_not_configured"]
@@ -137,6 +163,7 @@ export class ResearchSearchClient {
         enabled: true,
         provider: buildProviderLabel(this.env),
         plannedQueries: [],
+        expansionPoints: [],
         ...(queryPlan.rationale ? { planReason: queryPlan.rationale } : {}),
         documents: [],
         inaccessibleSourceNotes: dedupeStrings([
@@ -147,12 +174,18 @@ export class ResearchSearchClient {
       };
     }
 
-    const gathered = await this.searchAndFetch(queryPlan.queries);
+    this.logger.info("research_search.expand.start", {
+      jobId: request.jobId,
+      queryCount: queryPlan.queries.length,
+      pointCount: queryPlan.expansionPoints.length
+    });
+    const gathered = await this.searchAndFetch(queryPlan);
 
     return {
       enabled: true,
       provider: buildProviderLabel(this.env),
       plannedQueries: queryPlan.queries,
+      expansionPoints: queryPlan.expansionPoints,
       ...(queryPlan.rationale ? { planReason: queryPlan.rationale } : {}),
       documents: gathered.documents,
       inaccessibleSourceNotes: dedupeStrings([
@@ -165,6 +198,10 @@ export class ResearchSearchClient {
 
   private isWeixinEnabled() {
     return this.env.WEIXIN_SEARCH_ENABLED && Boolean(this.env.WEIXIN_SEARCH_API_URL);
+  }
+
+  private isGoogleSearchEnabled() {
+    return Boolean(this.env.GOOGLE_SEARCH_API_KEY && this.env.GOOGLE_SEARCH_CX);
   }
 
   private async generateQueryPlan(request: SearchExpansionRequest) {
@@ -180,6 +217,7 @@ export class ResearchSearchClient {
       const parsed = parseQueryPlan(raw, this.env.RESEARCH_SEARCH_MAX_QUERIES);
       return {
         queries: parsed.queries,
+        expansionPoints: parsed.expansionPoints,
         rationale: parsed.rationale,
         inaccessibleSourceNotes: dedupeStrings([
           ...parsed.inaccessibleSourceNotes,
@@ -193,6 +231,7 @@ export class ResearchSearchClient {
       });
       return {
         queries: buildFallbackQueries(request, this.env.RESEARCH_SEARCH_MAX_QUERIES),
+        expansionPoints: [],
         rationale: "fallback_query_heuristics",
         inaccessibleSourceNotes: inferClosedSourceNotes(request)
       };
@@ -222,7 +261,7 @@ export class ResearchSearchClient {
           {
             role: "system",
             content:
-              "You are a research search planner. Output strict JSON with keys queries, rationale, inaccessible_source_notes."
+              "You are a research search planner. Output strict JSON with keys: points, queries, rationale, inaccessible_source_notes. points is an array of {point, reason, priority, queries}."
           },
           {
             role: "user",
@@ -256,7 +295,7 @@ export class ResearchSearchClient {
           {
             role: "system",
             content:
-              "You are a research search planner. Output strict JSON with keys queries, rationale, inaccessible_source_notes."
+              "You are a research search planner. Output strict JSON with keys: points, queries, rationale, inaccessible_source_notes. points is an array of {point, reason, priority, queries}."
           },
           {
             role: "user",
@@ -291,14 +330,31 @@ export class ResearchSearchClient {
     return "openai-compatible";
   }
 
-  private async searchAndFetch(queries: string[]) {
+  private async searchAndFetch(plan: {
+    queries: string[];
+    expansionPoints: Array<{ point: string; reason?: string; priority: number; queries: string[] }>;
+  }) {
     const warnings: string[] = [];
     const rawResults: SearchDocument[] = [];
+    const queryContext = new Map<string, { point?: string; reason?: string }>();
+    for (const point of plan.expansionPoints) {
+      for (const query of point.queries) {
+        queryContext.set(query, {
+          point: point.point,
+          ...(point.reason ? { reason: point.reason } : {})
+        });
+      }
+    }
 
-    for (const query of queries.slice(0, this.env.RESEARCH_SEARCH_MAX_QUERIES)) {
+    for (const query of plan.queries.slice(0, this.env.RESEARCH_SEARCH_MAX_QUERIES)) {
+      const context = queryContext.get(query);
+      this.logger.info("research_search.query.start", {
+        query,
+        expansionPoint: context?.point ?? null
+      });
       const providerCalls: Array<Promise<SearchDocument[]>> = [];
 
-      if (this.env.SEARCH_API_URL) {
+      if (this.env.SEARCH_API_URL || this.isGoogleSearchEnabled()) {
         providerCalls.push(
           this.searchWebOnce(query).catch((error: unknown) => {
             warnings.push(`web_search_failed:${query}`);
@@ -326,7 +382,13 @@ export class ResearchSearchClient {
 
       const results = await Promise.all(providerCalls);
       for (const batch of results) {
-        rawResults.push(...batch);
+        rawResults.push(
+          ...batch.map((item) => ({
+            ...item,
+            ...(context?.point ? { expansionPoint: context.point } : {}),
+            ...(context?.reason ? { expansionPointReason: context.reason } : {})
+          }))
+        );
       }
     }
 
@@ -368,36 +430,72 @@ export class ResearchSearchClient {
       })
     );
 
+    const rankedHydrated = rankAndSortDocuments(hydrated).map((item) => ({
+      ...item,
+      rankingScore: computeQualityScore(item)
+    }));
+    const highQuality = rankedHydrated
+      .filter((item) => item.rankingScore >= 55)
+      .slice(0, this.env.RESEARCH_SEARCH_MAX_RESULTS);
+    const selected = highQuality.length > 0
+      ? highQuality
+      : rankedHydrated.slice(0, Math.min(3, this.env.RESEARCH_SEARCH_MAX_RESULTS));
+
+    this.logger.info("research_search.expand.complete", {
+      totalCandidates: rankedHydrated.length,
+      selectedCount: selected.length,
+      highQualityCount: highQuality.length
+    });
+
     return {
-      documents: rankAndSortDocuments(hydrated),
+      documents: selected,
       warnings: dedupeStrings(warnings)
     };
   }
 
   private async searchWebOnce(query: string) {
-    if (!this.env.SEARCH_API_URL) {
-      throw new ExternalServiceError("SEARCH_API_MISSING", "SEARCH_API_URL is not configured.");
+    if (this.env.SEARCH_API_URL) {
+      const headers = buildAuthHeaders(this.env.SEARCH_API_AUTH_HEADER, this.env.SEARCH_API_KEY);
+      const response = await fetchJson<SearchApiResponse>(this.env.SEARCH_API_URL, {
+        method: "POST",
+        timeoutMs: this.env.HTTP_TIMEOUT_MS,
+        retryCount: 1,
+        headers: {
+          "content-type": "application/json",
+          ...headers
+        },
+        body: JSON.stringify({
+          query,
+          maxResults: this.env.RESEARCH_SEARCH_RESULTS_PER_QUERY,
+          languageHints: ["zh-CN", "en"],
+          blockedDomains: ["xiaohongshu.com", "weixin.sogou.com"],
+          preferOfficialSources: true
+        })
+      });
+
+      return parseSearchApiResponse(response, query);
     }
 
-    const headers = buildAuthHeaders(this.env.SEARCH_API_AUTH_HEADER, this.env.SEARCH_API_KEY);
-    const response = await fetchJson<SearchApiResponse>(this.env.SEARCH_API_URL, {
-      method: "POST",
-      timeoutMs: this.env.HTTP_TIMEOUT_MS,
-      retryCount: 1,
-      headers: {
-        "content-type": "application/json",
-        ...headers
-      },
-      body: JSON.stringify({
-        query,
-        maxResults: this.env.RESEARCH_SEARCH_RESULTS_PER_QUERY,
-        languageHints: ["zh-CN", "en"],
-        blockedDomains: ["xiaohongshu.com", "weixin.sogou.com"],
-        preferOfficialSources: true
-      })
-    });
+    if (!this.isGoogleSearchEnabled()) {
+      throw new ExternalServiceError(
+        "SEARCH_API_MISSING",
+        "SEARCH_API_URL or Google search config is not configured."
+      );
+    }
 
-    return parseSearchApiResponse(response, query);
+    const url = new URL("https://customsearch.googleapis.com/customsearch/v1");
+    url.searchParams.set("key", this.env.GOOGLE_SEARCH_API_KEY!);
+    url.searchParams.set("cx", this.env.GOOGLE_SEARCH_CX!);
+    url.searchParams.set("q", query);
+    url.searchParams.set("num", String(Math.min(10, this.env.RESEARCH_SEARCH_RESULTS_PER_QUERY)));
+    url.searchParams.set("safe", "off");
+    url.searchParams.set("hl", "zh-CN");
+    const response = await fetchJson<GoogleCustomSearchResponse>(url.toString(), {
+      method: "GET",
+      timeoutMs: this.env.HTTP_TIMEOUT_MS,
+      retryCount: 1
+    });
+    return parseGoogleSearchResponse(response, query);
   }
 
   private async searchWeixinOnce(query: string) {
@@ -468,8 +566,11 @@ function buildQueryPlanningPrompt(request: SearchExpansionRequest, maxQueries: n
   const imageContext = request.imageResearchSummaries.slice(0, 2).join("\n\n");
 
   return [
-    "Please generate search queries for secondary research.",
-    `Return JSON only. At most ${maxQueries} concise queries.`,
+    "Please generate clue-driven secondary research plan.",
+    `Return JSON only. At most ${maxQueries} concise queries in total.`,
+    "You must first extract 2-4 high-value expansion points from the input article/user request.",
+    "For each expansion point, provide why this point matters and 1-2 targeted search queries.",
+    "Prefer fewer but high-signal points. Avoid generic queries.",
     "Prefer authoritative and open-web sources such as company IR pages, filings, official docs, standards bodies, papers, major media, and public technical blogs.",
     "For Chinese topics, include query variants that are likely to surface high-signal public WeChat articles, but do not assume closed ecosystems are fully searchable.",
     "If the topic is Chinese and some high-value sources may be inside closed ecosystems, mention that in inaccessible_source_notes.",
@@ -493,9 +594,42 @@ function parseQueryPlan(raw: string, maxQueries: number) {
         .filter(Boolean)
         .slice(0, maxQueries)
     : [];
+  const expansionPoints = Array.isArray(parsed.points)
+    ? parsed.points
+        .map((point, index) => {
+          const pointLabel =
+            typeof point?.point === "string" ? point.point.trim() : "";
+          const pointQueries = Array.isArray(point?.queries)
+            ? point.queries
+                .map((item) => (typeof item === "string" ? item.trim() : ""))
+                .filter(Boolean)
+                .slice(0, Math.max(1, Math.floor(maxQueries / 2)))
+            : [];
+          if (!pointLabel || pointQueries.length === 0) {
+            return undefined;
+          }
+          return {
+            point: pointLabel,
+            ...(typeof point.reason === "string" && point.reason.trim()
+              ? { reason: point.reason.trim() }
+              : {}),
+            priority:
+              typeof point.priority === "number" && Number.isFinite(point.priority)
+                ? point.priority
+                : index + 1,
+            queries: pointQueries
+          };
+        })
+        .filter((item): item is { point: string; reason?: string; priority: number; queries: string[] } =>
+          Boolean(item)
+        )
+    : [];
+  const flattenedPointQueries = expansionPoints.flatMap((item) => item.queries);
+  const mergedQueries = dedupeStrings([...queries, ...flattenedPointQueries]).slice(0, maxQueries);
 
   return {
-    queries,
+    queries: mergedQueries,
+    expansionPoints,
     ...(typeof parsed.rationale === "string" && parsed.rationale.trim().length > 0
       ? { rationale: parsed.rationale.trim() }
       : {}),
@@ -536,6 +670,36 @@ function buildFallbackQueries(request: SearchExpansionRequest, maxQueries: numbe
   return profileQueries.slice(0, maxQueries);
 }
 
+function computeQualityScore(item: SearchDocument) {
+  let score = item.rankingScore;
+  const fetchedText =
+    item.fetchedDocument?.text ??
+    item.fetchedDocument?.excerpt ??
+    "";
+  if (item.fetchedDocument) {
+    score += 14;
+  }
+  if (fetchedText.length >= 600) {
+    score += 14;
+  } else if (fetchedText.length >= 200) {
+    score += 8;
+  } else if (fetchedText.length < 80) {
+    score -= 10;
+  }
+
+  const host = safeHostname(item.sourceUrl);
+  if (/(\.|^)gov(\.|$)|(\.|^)edu(\.|$)|sec\.gov$|arxiv\.org$/.test(host)) {
+    score += 10;
+  }
+  if (/medium\.com$|substack\.com$/.test(host)) {
+    score -= 4;
+  }
+  if (!item.title && !item.snippet) {
+    score -= 6;
+  }
+  return score;
+}
+
 function parseSearchApiResponse(response: SearchApiResponse, query: string) {
   const normalized: SearchDocument[] = [];
   const pushIfValid = (item: SearchDocument | undefined) => {
@@ -555,6 +719,23 @@ function parseSearchApiResponse(response: SearchApiResponse, query: string) {
     pushIfValid(buildWebSearchDocument(query, item.url, item.title, item.content, item.source));
   }
 
+  return normalized;
+}
+
+function parseGoogleSearchResponse(response: GoogleCustomSearchResponse, query: string) {
+  const normalized: SearchDocument[] = [];
+  for (const item of response.items ?? []) {
+    const candidate = buildWebSearchDocument(
+      query,
+      item.link,
+      item.title,
+      item.snippet,
+      item.displayLink
+    );
+    if (candidate) {
+      normalized.push(candidate);
+    }
+  }
   return normalized;
 }
 
@@ -776,6 +957,7 @@ function buildAuthHeaders(headerName: string, apiKey?: string) {
 function buildProviderLabel(env: Env) {
   const providers: string[] = [];
   if (env.SEARCH_API_URL) providers.push("web_search");
+  else if (env.GOOGLE_SEARCH_API_KEY && env.GOOGLE_SEARCH_CX) providers.push("google_cse");
   if (env.WEIXIN_SEARCH_ENABLED && env.WEIXIN_SEARCH_API_URL) providers.push("weixin_search");
   return providers.join("+") || "none";
 }
